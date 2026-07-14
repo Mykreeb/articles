@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <title>Building Enterprise SSO with Stytch in a Rails API: The Complete Guide</title>
+
+  <!-- Medium import + Open Graph meta -->
+  <meta property="og:type"                content="article" />
+  <meta property="og:title"               content="Building Enterprise SSO with Stytch in a Rails API: The Complete Guide" />
+  <meta property="og:description"         content="How we implemented SAML/OIDC, OAuth, Magic Links, and TOTP MFA in production" />
+  <meta property="article:published_time" content="2025-05-24T00:00:00.000Z" />
+  <meta property="article:author"         content="Tolulope Olaniyan" />
+  <meta name="description"               content="How we implemented SAML/OIDC, OAuth, Magic Links, and TOTP MFA in production with Stytch and Ruby on Rails." />
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Georgia', serif;
+      font-size: 18px;
+      line-height: 1.8;
+      color: #292929;
+      background: #fff;
+      padding: 40px 20px 80px;
+    }
+
+    article {
+      max-width: 720px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      font-size: 2.2rem;
+      font-weight: 800;
+      line-height: 1.2;
+      margin-bottom: 12px;
+      color: #111;
+    }
+
+    .subtitle {
+      font-size: 1.1rem;
+      color: #555;
+      font-style: italic;
+      margin-bottom: 24px;
+    }
+
+    .meta {
+      font-size: 0.85rem;
+      color: #999;
+      margin-bottom: 48px;
+      font-family: sans-serif;
+    }
+
+    h2 {
+      font-size: 1.5rem;
+      font-weight: 700;
+      margin-top: 52px;
+      margin-bottom: 16px;
+      color: #111;
+    }
+
+    h3 {
+      font-size: 1.15rem;
+      font-weight: 700;
+      margin-top: 36px;
+      margin-bottom: 12px;
+      color: #222;
+    }
+
+    p {
+      margin-bottom: 20px;
+    }
+
+    hr {
+      border: none;
+      border-top: 1px solid #e0e0e0;
+      margin: 48px 0;
+    }
+
+    pre {
+      background: #1e1e1e;
+      color: #d4d4d4;
+      padding: 24px;
+      border-radius: 6px;
+      overflow-x: auto;
+      font-size: 0.88rem;
+      line-height: 1.6;
+      margin: 24px 0;
+      font-family: 'Courier New', Courier, monospace;
+    }
+
+    code {
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 0.9em;
+      background: #f3f3f3;
+      padding: 2px 6px;
+      border-radius: 3px;
+      color: #c7254e;
+    }
+
+    pre code {
+      background: none;
+      color: inherit;
+      padding: 0;
+      font-size: inherit;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 28px 0;
+      font-size: 0.95rem;
+      font-family: sans-serif;
+    }
+
+    th {
+      background: #f5f5f5;
+      font-weight: 700;
+      text-align: left;
+      padding: 12px 16px;
+      border: 1px solid #ddd;
+    }
+
+    td {
+      padding: 12px 16px;
+      border: 1px solid #ddd;
+      vertical-align: top;
+    }
+
+    tr:nth-child(even) td { background: #fafafa; }
+
+    ol, ul {
+      padding-left: 28px;
+      margin-bottom: 20px;
+    }
+
+    li { margin-bottom: 10px; }
+
+    .callout {
+      background: #f0f7ff;
+      border-left: 4px solid #3b82f6;
+      padding: 16px 20px;
+      border-radius: 0 6px 6px 0;
+      margin: 28px 0;
+      font-size: 0.95rem;
+    }
+  </style>
+</head>
+<body>
+<article>
+
+  <h1>Building Enterprise SSO with Stytch in a Rails API: The Complete Guide</h1>
+  <p class="subtitle">How we implemented SAML/OIDC, OAuth, Magic Links, and TOTP MFA in production</p>
+  <p class="meta">
+    <time datetime="2025-05-24">May 24, 2025</time>
+  </p>
+
+  <p>
+    Single sign-on sounds simple — until you're deep into SAML attribute namespaces at 11pm
+    wondering why Entra ID and Okta send user emails in completely different fields. This
+    article walks through how we built a production multi-tenant SSO system in Rails using
+    Stytch, covering B2B enterprise SSO, B2C OAuth, magic links, and TOTP MFA.
+  </p>
+
+  <hr />
+
+  <h2>Why Stytch?</h2>
+
+  <p>
+    We evaluated several authentication platforms before landing on Stytch. The key
+    differentiator: Stytch treats B2B and B2C as genuinely separate products — each with
+    their own project, SDK client, and token namespace. That matters when your platform
+    serves both enterprise clients (who want SAML/OIDC via Okta or Entra ID) and individual
+    users (who just want "Sign in with Google").
+  </p>
+
+  <p>
+    The alternative — cramming both into one auth system — creates subtle bugs when
+    org-level MFA policies bleed into consumer flows.
+  </p>
+
+  <hr />
+
+  <h2>Architecture Overview</h2>
+
+  <p>The system has three authentication flows:</p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Flow</th>
+        <th>Who</th>
+        <th>How</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>B2B SSO</td>
+        <td>Enterprise orgs</td>
+        <td>SAML/OIDC via Stytch B2B</td>
+      </tr>
+      <tr>
+        <td>B2C OAuth</td>
+        <td>Individual users</td>
+        <td>Google / Microsoft OAuth</td>
+      </tr>
+      <tr>
+        <td>Magic Links</td>
+        <td>New org members</td>
+        <td>Stytch B2B invite emails</td>
+      </tr>
+      <tr>
+        <td>TOTP MFA</td>
+        <td>MFA-required orgs</td>
+        <td>Authenticator app (6-digit code)</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>
+    Each organization in our system has two Stytch identifiers stored on the record:
+    <code>stytch_organization_id</code> and <code>stytch_connection_id</code> — the
+    connection being the specific SAML/OIDC configuration for their IdP. When a user logs
+    in, we look up their organization by email domain and use those two IDs to route them
+    to the right IdP.
+  </p>
+
+  <hr />
+
+  <h2>Step 1: Two Clients, Not One</h2>
+
+  <p>
+    The first architectural decision was separating Stytch clients for B2B and B2C into a
+    shared Rails concern. Enterprise SSO uses <code>StytchB2B::Client</code>; individual
+    OAuth uses <code>Stytch::Client</code> pointed at a separate B2C project. Both are
+    lazy-initialized with <code>||=</code> so they're memoized per-request.
+  </p>
+
+<pre><code>module StytchClientConcern
+  extend ActiveSupport::Concern
+
+  def b2b_stytch_client
+    @b2b_stytch_client ||= StytchB2B::Client.new(
+      project_id: ENV["STYTCH_PROJECT_ID"],
+      secret:     ENV["STYTCH_SECRET"]
+    )
+  end
+
+  def b2c_stytch_client
+    @b2c_stytch_client ||= Stytch::Client.new(
+      project_id: ENV["STYTCH_B2C_PROJECT_ID"],
+      secret:     ENV["STYTCH_B2C_SECRET"]
+    )
+  end
+end</code></pre>
+
+  <p>
+    Keeping the projects separate means org-level MFA policies can never accidentally apply
+    to a consumer OAuth login.
+  </p>
+
+  <hr />
+
+  <h2>Step 2: The B2B SSO Flow</h2>
+
+  <h3>Authorize</h3>
+
+  <p>
+    When an enterprise user types their email, we look up their organization by domain and
+    return the Stytch SSO start URL. The frontend redirects the user there — Stytch handles
+    the full SAML/OIDC handshake with the IdP. When authentication completes, Stytch
+    redirects back to our callback with a short-lived code.
+  </p>
+
+  <h3>Callback — The IdP Detection Problem</h3>
+
+  <p>
+    This is where things get interesting. Azure Entra ID and Okta both speak SAML but send
+    user attributes in completely different namespaces. We auto-detect which IdP we're
+    talking to by checking for an Entra-specific attribute prefix:
+  </p>
+
+<pre><code>def detect_idp_type(sso_registration)
+  if sso_registration.dig(
+    "sso_attributes",
+    "http://schemas.microsoft.com/identity/claims/objectidentifier"
+  )&.first
+    :entra_id
+  else
+    :okta
+  end
+end</code></pre>
+
+  <p>
+    Entra uses long Microsoft XML schema URIs for every attribute. Okta uses short keys like
+    <code>firstName</code>, <code>email</code>, <code>id</code>. You won't find this
+    documented anywhere — it's something you discover by looking at real SAML responses from
+    both providers.
+  </p>
+
+  <p>
+    Once we know the IdP, we extract the user's email, name, and ID from the correct
+    attributes, then find or create the user record and establish a Rails session.
+  </p>
+
+  <hr />
+
+  <h2>Step 3: B2C OAuth — The Microsoft Email Problem</h2>
+
+  <p>
+    Google OAuth via Stytch is straightforward. Microsoft is not. Stytch's cached user
+    profile doesn't always have the email on first login. When that happens, we fall back
+    to calling Microsoft's Graph API directly using the access token Stytch provides:
+  </p>
+
+<pre><code>def extract_microsoft_email(resp)
+  user_response = b2c_stytch_client.users.get(user_id: resp["user_id"])
+  email = user_response.dig("user", "emails", 0, "email")
+
+  if email.nil?
+    access_token = resp.dig("provider_values", "access_token")
+    uri = URI("https://graph.microsoft.com/oidc/userinfo")
+    req = Net::HTTP::Get.new(uri)
+    req["Authorization"] = "Bearer #{access_token}"
+    res = Net::HTTP.start(uri.host, 443, use_ssl: true) { |h| h.request(req) }
+    email = JSON.parse(res.body)["email"]
+  end
+
+  email
+end</code></pre>
+
+  <div class="callout">
+    This fallback took an embarrassing amount of time to find. Save yourself the trouble.
+  </div>
+
+  <hr />
+
+  <h2>Step 4: Magic Links for Passwordless Invites</h2>
+
+  <p>
+    When an admin invites a new member to an SSO-enabled org, we use Stytch's B2B Magic
+    Links API instead of a traditional invite email. One API call sends the magic link; when
+    the user clicks it, we validate the token and redirect them into the full SAML flow. The
+    invite and the SSO session end up seamlessly connected — with no password ever set.
+  </p>
+
+  <hr />
+
+  <h2>Step 5: TOTP MFA</h2>
+
+  <p>
+    Organizations can require MFA for all members. The key concept here is Stytch's
+    <strong>intermediate session token</strong> — it represents a user who passed SSO but
+    hasn't completed MFA yet. We return it to the frontend alongside the TOTP QR code on
+    first enrollment. The frontend holds it while the user scans the QR code, then sends it
+    back with the 6-digit code to complete authentication.
+  </p>
+
+<pre><code># First login: create TOTP and return QR code + intermediate token
+totp_resp = b2b_stytch_client.totps.create(
+  organization_id: org.stytch_organization_id,
+  member_id:       member_id
+)
+
+# Subsequent logins: verify the code
+b2b_stytch_client.totps.authenticate(
+  organization_id:           org.stytch_organization_id,
+  member_id:                 member_id,
+  code:                      params[:code],
+  intermediate_session_token: params[:intermediate_session_token]
+)</code></pre>
+
+  <p>
+    The intermediate token cleanly separates "passed SSO" from "completed MFA" without any
+    custom state management on our end.
+  </p>
+
+  <h3>Migrating Existing Users to MFA</h3>
+
+  <p>
+    When an org retroactively enables MFA, we don't force password resets. Instead, we use
+    Stytch's <code>passwords.migrate</code> endpoint to register the user's existing bcrypt
+    hash the first time they log in — zero downtime, transparent to the user.
+  </p>
+
+  <hr />
+
+  <h2>Session Management</h2>
+
+  <p>
+    One thing worth calling out: Stytch gives you a <code>session_token</code> and
+    <code>session_jwt</code> in every successful auth response, but we don't use them for
+    subsequent API requests. We use Rails' standard cookie-based session. The Stytch tokens
+    are returned to the frontend in case it needs them, but our backend validates the Rails
+    session cookie on every request.
+  </p>
+
+  <p>
+    Keep your auth boundary clear — don't mix Stytch token validation with your existing
+    session middleware.
+  </p>
+
+  <hr />
+
+  <h2>Lessons Learned</h2>
+
+  <ol>
+    <li>
+      <strong>Entra ID and Okta have completely different SAML attribute schemas.</strong>
+      Plan for IdP detection from day one — you can't assume a uniform attribute shape
+      across providers.
+    </li>
+    <li>
+      <strong>Microsoft Graph is your fallback for missing emails.</strong> Stytch's cached
+      profile won't always have the email on first Microsoft OAuth login.
+    </li>
+    <li>
+      <strong>Intermediate session tokens are your MFA handshake.</strong> Hold them on the
+      frontend between SSO and MFA steps — never persist them server-side.
+    </li>
+    <li>
+      <strong>Separate your B2B and B2C Stytch projects.</strong> The forced SDK separation
+      makes you intentional about which flow each request goes through.
+    </li>
+    <li>
+      <strong>Migrate passwords lazily, not in batch.</strong> Use
+      <code>passwords.migrate</code> on first login for MFA-required orgs. No downtime, no
+      user-facing change.
+    </li>
+  </ol>
+
+  <hr />
+
+  <p>
+    The full implementation spans <code>SsoController</code>, <code>OauthController</code>,
+    <code>InvitesController</code>, and a shared <code>StytchClientConcern</code>. If
+    you're building something similar and want to go deeper on any part, drop a comment
+    below.
+  </p>
+
+</article>
+</body>
+</html>
